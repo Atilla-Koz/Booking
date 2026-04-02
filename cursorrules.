@@ -1,0 +1,228 @@
+# Full-Stack Booking System — Cursor Rules
+
+## Project Overview
+A decoupled monorepo booking system with a Next.js frontend and NestJS backend.
+
+---
+
+## Monorepo Structure
+```
+/
+├── apps/
+│   ├── web/          # Next.js 14 (App Router) — Frontend
+│   └── api/          # NestJS — Backend
+├── packages/
+│   └── shared/       # Shared Zod schemas, types, constants
+└── package.json      # Root workspace config (pnpm or npm workspaces)
+```
+
+---
+
+## Tech Stack
+
+### Frontend (apps/web)
+- **Framework**: Next.js 14 with App Router
+- **Language**: TypeScript (strict mode)
+- **Styling**: TailwindCSS
+- **Validation**: Zod (imported from packages/shared)
+- **HTTP Client**: fetch / axios
+- **State**: React hooks (useState, useEffect, useOptimistic)
+
+### Backend (apps/api)
+- **Framework**: NestJS
+- **Language**: TypeScript (strict mode)
+- **Validation**: Zod (imported from packages/shared) + class-validator where NestJS requires
+- **ORM**: Drizzle ORM
+- **Database**: PostgreSQL
+- **Auth**: JWT (passport-jwt)
+
+### Shared (packages/shared)
+- Zod schemas used by both frontend and backend
+- TypeScript types inferred from Zod schemas
+- Shared constants (time slots, durations, etc.)
+
+---
+
+## TypeScript Rules
+- Always use `strict: true` in tsconfig
+- Never use `any` — use `unknown` and narrow with Zod or type guards
+- Prefer `type` over `interface` for data shapes; use `interface` for class contracts
+- All async functions must have explicit return types
+- Use `z.infer<typeof Schema>` to derive TypeScript types from Zod schemas
+- Export types alongside schemas from packages/shared
+
+---
+
+## NestJS Backend Rules
+- Follow the Module → Controller → Service pattern strictly
+- Each feature (e.g., bookings, users, auth) gets its own module folder:
+  ```
+  src/
+  ├── bookings/
+  │   ├── bookings.module.ts
+  │   ├── bookings.controller.ts
+  │   ├── bookings.service.ts
+  │   └── dto/
+  ├── users/
+  ├── auth/
+  └── database/
+  ```
+- Use `@Injectable()`, `@Controller()`, `@Get()`, `@Post()` decorators correctly
+- Use NestJS `ValidationPipe` globally with `transform: true`
+- Use Zod schemas inside services for business logic validation
+- Use `@UseGuards(JwtAuthGuard)` on protected routes
+- Use database transactions for concurrent booking prevention (SELECT FOR UPDATE)
+- Return standardized response shapes: `{ data, message, statusCode }`
+- Use NestJS `HttpException` for all error throwing
+- Never expose raw DB errors to the client
+
+---
+
+## Drizzle ORM Rules
+- Define all schemas in `apps/api/src/database/schema/`
+- Use `pgTable` for PostgreSQL tables
+- Use Drizzle `migrate` for migrations — never alter DB manually
+- All queries must be typed — no raw SQL unless wrapped in `sql` template tag
+- Use `db.transaction()` for operations that must be atomic (e.g., booking creation)
+- Index columns used in WHERE clauses (date, userId, status)
+
+### Required Tables
+```ts
+// bookings table
+id, userId, date, timeSlot, durationMinutes, status, createdAt, updatedAt
+
+// users table
+id, email, name, passwordHash, createdAt
+
+// sessions table (available time slots config)
+id, dayOfWeek, startTime, durationMinutes, isActive
+```
+
+---
+
+## Next.js Frontend Rules
+- Use App Router exclusively — no `pages/` directory
+- Fetch data in Server Components where possible; use Client Components only when interactivity is needed
+- Mark client components with `'use client'` at the top
+- Use Next.js `loading.tsx` and `error.tsx` for loading/error states
+- API calls go in `apps/web/src/lib/api/` as typed fetch functions
+- Validate API responses with Zod schemas from packages/shared
+- Use TailwindCSS utility classes only — no inline styles, no CSS modules
+- Components live in `apps/web/src/components/`
+- Pages live in `apps/web/src/app/`
+
+### Required Components
+- `<BookingWidget />` — main booking UI container
+- `<CalendarView />` — calendar with available/unavailable day indicators
+- `<TimeSlotPicker />` — list of available time slots for selected date
+- `<ConfirmationModal />` — booking confirmation dialog
+- `<LoadingSpinner />` — reusable loading state
+- `<ErrorMessage />` — reusable error display
+
+---
+
+## API Endpoints
+
+### GET /bookings/available?date=YYYY-MM-DD
+- Returns available time slots for the given date
+- Filters out already booked slots from DB
+- Includes: `{ timeSlot, startTime, durationMinutes, available }`
+- Handles timezone via query param `?timezone=Europe/Istanbul`
+
+### POST /bookings
+- Auth required (JWT)
+- Body: `{ userId, date, timeSlot }`
+- Validates slot is still available (use DB transaction + SELECT FOR UPDATE)
+- Returns: `{ bookingId, date, timeSlot, status: 'confirmed' }`
+- Throws 409 Conflict if slot is taken
+
+---
+
+## Zod Shared Schemas (packages/shared)
+
+```ts
+// All schemas must be defined here and reused in both apps
+
+export const BookingRequestSchema = z.object({
+  userId: z.string().uuid(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  timeSlot: z.string(),
+})
+
+export const AvailableSessionSchema = z.object({
+  timeSlot: z.string(),
+  startTime: z.string(),
+  durationMinutes: z.number(),
+  available: z.boolean(),
+})
+
+export type BookingRequest = z.infer<typeof BookingRequestSchema>
+export type AvailableSession = z.infer<typeof AvailableSessionSchema>
+```
+
+---
+
+## Error Handling Rules
+- Backend: Always throw `HttpException` with a descriptive message and correct HTTP status
+- Frontend: Wrap all API calls in try/catch, display user-friendly error messages
+- Handle these specific cases:
+  - `409 Conflict` → "This time slot is no longer available"
+  - `400 Bad Request` → Show Zod validation errors to user
+  - `401 Unauthorized` → Redirect to login
+  - `500 Internal Server Error` → "Something went wrong, please try again"
+- Never show stack traces or DB error messages to the user
+
+---
+
+## Authentication Rules
+- Use JWT access tokens (short-lived: 15min) + refresh tokens (7 days)
+- Store access token in memory (React state), refresh token in HttpOnly cookie
+- Protect all booking mutation endpoints with `JwtAuthGuard`
+- `GET /bookings/available` is public (no auth required)
+- Implement `POST /auth/login`, `POST /auth/register`, `POST /auth/refresh`
+
+---
+
+## Concurrency & Double Booking Prevention
+- Use PostgreSQL advisory locks OR `SELECT ... FOR UPDATE` inside a transaction
+- Check availability and insert in a single transaction:
+  ```ts
+  await db.transaction(async (tx) => {
+    const existing = await tx.select()...where(eq(bookings.timeSlot, slot)).for('update')
+    if (existing.length > 0) throw new ConflictException(...)
+    await tx.insert(bookings).values(...)
+  })
+  ```
+
+---
+
+## Testing Rules
+- Unit tests: Jest for NestJS services (mock DB layer)
+- Integration tests: Supertest for API endpoints
+- E2E tests: Playwright for critical booking flow
+- Test file naming: `*.spec.ts` for unit, `*.e2e-spec.ts` for E2E
+- Minimum coverage targets: Services 80%, Controllers 70%
+
+---
+
+## Code Style
+- Use `async/await` — never `.then().catch()` chains
+- Prefer early returns over nested conditionals
+- All exported functions/classes must have JSDoc comments
+- No magic strings — define constants in packages/shared
+- Prettier + ESLint must pass before committing
+- Commit messages: `feat:`, `fix:`, `chore:`, `test:` prefixes
+
+---
+
+## Environment Variables
+```
+# apps/api/.env
+DATABASE_URL=postgresql://user:pass@localhost:5432/booking_db
+JWT_SECRET=your_jwt_secret
+JWT_REFRESH_SECRET=your_refresh_secret
+PORT=3001
+
+# apps/web/.env.local
+NEXT_PUBLIC_API_URL=http://localhost:3001
+```
